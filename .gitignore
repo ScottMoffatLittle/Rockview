@@ -1,0 +1,10 @@
+# Ignore credential files
+key.json
+secrets.env
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore Python compiled files
+__pycache__/
+*.pyc
