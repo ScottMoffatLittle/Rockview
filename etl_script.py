@@ -9,7 +9,6 @@ import urllib.parse
 import hmac
 import hashlib
 import base64
-import dlt
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
