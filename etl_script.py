@@ -198,11 +198,18 @@ def load_data_to_bq(query, DESTINATION_TABLE):
             record['updated_at'] = timestamp
 
 
+        batch_length = len(batch)  # Check the number of rows in the batch
+        if batch_length == 0:
+            print("No data to insert!")
+            return False
+
         errors = client.insert_rows_json(DESTINATION_TABLE, batch)
         if not errors:
-            print(f"✅ Successfully loaded {len(batch)} rows into BigQuery.")
+            print(f"✅ Successfully loaded {batch_length} rows into BigQuery.")
+            return True
         else:
             print(f"❌ Failed to load data into BigQuery: {errors}")
+            return False
 
 
 
@@ -226,7 +233,7 @@ def load_full_netsuite_table(table_name, columns):
         "q": f"SELECT {', '.join([item for item in columns])} FROM {table_name}"
     }
     
-    load_data_to_bq(query)
+    return load_data_to_bq(query)
 
 
 # Get NetSuite data from the last 2 days, based on lastmodifieddate
@@ -241,11 +248,12 @@ def load_recent_netsuite_data(ns_table, columns, destination_table):
         "q": f"""
         SELECT {', '.join([item for item in columns])} 
         FROM {ns_table}
-        WHERE lastmodifieddate >= TO_DATE('{current_date}', 'MM/DD/YYYY') - 2
+        WHERE lastmodifieddate >= TO_DATE('{current_date}', 'MM/DD/YYYY') - 200
         """
     }
     
-    load_data_to_bq(query, destination_table)
+    return load_data_to_bq(query, destination_table)
+
 
 
 # merge data into BigQuery, so that existing rows are not duplicated
@@ -324,6 +332,7 @@ def drop_table(table_id):
 
 """  ----------- TEST MERGE SCRIPT -----------  """
 STAGING_DATASET_PATH = f"{PROJECT_ID}.{DATASET_ID_STAGING}"
+print(STAGING_DATASET_PATH)
 
 
 # delete account_test and account_staging tables
@@ -346,11 +355,11 @@ time.sleep(5)
 
 
 # load data from ns account table, for specified columns, into bq staging table
-load_recent_netsuite_data("account", ACCOUNT_COLUMNS, ACCOUNT_TABLE_STAGING)
+result = load_recent_netsuite_data("account", ACCOUNT_COLUMNS, ACCOUNT_TABLE_STAGING)
 time.sleep(5)
 
 # Merge staging table into account table
-merge_into_bigquery(ACCOUNT_TABLE_TEST, ACCOUNT_TABLE_STAGING, ACCOUNT_COLUMNS)
+if result: merge_into_bigquery(ACCOUNT_TABLE_TEST, ACCOUNT_TABLE_STAGING, ACCOUNT_COLUMNS)
 
 # Delete staging dataset
 drop_dataset(STAGING_DATASET_PATH)
