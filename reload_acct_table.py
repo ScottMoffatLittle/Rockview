@@ -416,25 +416,12 @@ ACCOUNT_TABLE = f"{PROJECT_ID}.{DATASET_ID}.Account"
 ACCOUNT_TABLE_STAGING = f"{PROJECT_ID}.{DATASET_ID_STAGING}.Account_staging"
 
 
-# create staging dataset, if it does not already exist
-create_dataset(STAGING_DATASET_PATH)
+drop_table(ACCOUNT_TABLE)
+create_table(ACCOUNT_TABLE, ACCOUNT_SCHEMA)
+wait_for_table_creation(ACCOUNT_TABLE)
 
 
-# make account staging table based on schema
-create_table(ACCOUNT_TABLE_STAGING, ACCOUNT_SCHEMA)
-wait_for_table_creation(ACCOUNT_TABLE_STAGING)
-
-
-# load data from ns account table, for specified columns, into bq staging table
-# returns false if there is no new data
-result = load_recent_netsuite_data("account", ACCOUNT_SCHEMA, ACCOUNT_TABLE_STAGING)
-
-# If there is new data, Merge staging table into account table
-# Otherwise, do not run the merge
-if result: merge_into_bigquery(ACCOUNT_TABLE, ACCOUNT_TABLE_STAGING, ACCOUNT_SCHEMA)
-
-# Delete staging table
-drop_table(ACCOUNT_TABLE_STAGING)
+load_full_netsuite_table("account", ACCOUNT_SCHEMA, ACCOUNT_TABLE)
 
 
 
