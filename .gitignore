@@ -1,6 +1,7 @@
 # Ignore credential files
 key.json
 secrets.env
+secrets_prod.env
 
 # Ignore Jupyter Notebook checkpoints
 .ipynb_checkpoints/

@@ -12,6 +12,8 @@ import hashlib
 import base64
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+import gspread
+from google.oauth2.service_account import Credentials
 
 # Load environment variables from secrets.env
 load_dotenv("secrets.env")
@@ -33,85 +35,6 @@ NETSUITE_TOKEN = os.getenv("NETSUITE_TOKEN")
 NETSUITE_TOKEN_SECRET = os.getenv("NETSUITE_TOKEN_SECRET")
 
 
-TL_SCHEMA = [
-    SchemaField('id', 'INTEGER', 'NULLABLE'),
-    SchemaField('uniquekey', 'INTEGER', 'NULLABLE'),
-    SchemaField('linelastmodifieddate', 'DATE', 'NULLABLE'),
-    SchemaField('accountinglinetype', 'STRING', 'NULLABLE'),
-    SchemaField('actualshipdate', 'DATE', 'NULLABLE'),
-    SchemaField('assemblycomponent', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('blandedcost', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('class', 'STRING', 'NULLABLE'),
-    SchemaField('cleared', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('cleareddate', 'DATE', 'NULLABLE'),
-    SchemaField('closedate', 'DATE', 'NULLABLE'),
-    SchemaField('commitinventory', 'STRING', 'NULLABLE'),
-    SchemaField('commitmentfirm', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('costestimatetype', 'STRING', 'NULLABLE'),
-    SchemaField('createdfrom', 'STRING', 'NULLABLE'),
-    SchemaField('creditforeignamount', 'FLOAT', 'NULLABLE'),
-    SchemaField('custcol_360_do_not_pack', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('custcol_360_hold', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('custcol_360_hold_qty', 'FLOAT', 'NULLABLE'),
-    SchemaField('custcol_360_holdreason', 'INTEGER', 'NULLABLE'),
-    SchemaField('custcol_mg_expected_ready_date', 'DATE', 'NULLABLE'),
-    SchemaField('custcol_mg_fg_promise_date', 'DATE', 'NULLABLE'),
-    SchemaField('custcol_mg_orig_prom_date', 'DATE', 'NULLABLE'),
-    SchemaField('custcol_promise_date', 'DATE', 'NULLABLE'),
-    SchemaField('custcol_red_dot', 'DATE', 'NULLABLE'),
-    SchemaField('debitforeignamount', 'FLOAT', 'NULLABLE'),
-    SchemaField('documentnumber', 'STRING', 'NULLABLE'),
-    SchemaField('donotdisplayline', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('dropship', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('entity', 'STRING', 'NULLABLE'),
-    SchemaField('estgrossprofit', 'FLOAT', 'NULLABLE'),
-    SchemaField('estgrossprofitpercent', 'FLOAT', 'NULLABLE'),
-    SchemaField('expectedshipdate', 'DATE', 'NULLABLE'),
-    SchemaField('expenseaccount', 'STRING', 'NULLABLE'),
-    SchemaField('foreignamount', 'FLOAT', 'NULLABLE'),
-    SchemaField('fulfillable', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('fxamountlinked', 'FLOAT', 'NULLABLE'),
-    SchemaField('hasfulfillableitems', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('inventoryreportinglocation', 'STRING', 'NULLABLE'),
-    SchemaField('isbillable', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('isclosed', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('iscogs', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('isfullyshipped', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('isfxvariance', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('isinventoryaffecting', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('isrevrectransaction', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('item', 'STRING', 'NULLABLE'),
-    SchemaField('itemtype', 'STRING', 'NULLABLE'),
-    SchemaField('kitcomponent', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('landedcostperline', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('linesequencenumber', 'INTEGER', 'NULLABLE'),
-    SchemaField('location', 'STRING', 'NULLABLE'),
-    SchemaField('mainline', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('matchbilltoreceipt', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('memo', 'STRING', 'NULLABLE'),
-    SchemaField('netamount', 'FLOAT', 'NULLABLE'),
-    SchemaField('oldcommitmentfirm', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('paymentmethod', 'STRING', 'NULLABLE'),
-    SchemaField('processedbyrevcommit', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('quantity', 'FLOAT', 'NULLABLE'),
-    SchemaField('quantitybilled', 'FLOAT', 'NULLABLE'),
-    SchemaField('quantitypacked', 'FLOAT', 'NULLABLE'),
-    SchemaField('quantitypicked', 'FLOAT', 'NULLABLE'),
-    SchemaField('quantityrejected', 'FLOAT', 'NULLABLE'),
-    SchemaField('quantityshiprecv', 'FLOAT', 'NULLABLE'),
-    SchemaField('rate', 'FLOAT', 'NULLABLE'),
-    SchemaField('rateamount', 'FLOAT', 'NULLABLE'),
-    SchemaField('shipmethod', 'STRING', 'NULLABLE'),
-    SchemaField('specialorder', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('subsidiary', 'STRING', 'NULLABLE'),
-    SchemaField('taxline', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('transaction', 'INTEGER', 'NULLABLE'),
-    SchemaField('transactiondiscount', 'BOOLEAN', 'NULLABLE'),
-    SchemaField('units', 'STRING', 'NULLABLE'),
-    SchemaField('updated_at', 'TIMESTAMP', 'NULLABLE'),
-]
-
-
 # Initialize BigQuery client
 client = bigquery.Client()
 
@@ -123,6 +46,21 @@ BASE_URL = f"https://{NETSUITE_ACCOUNT_ID}.suitetalk.api.netsuite.com/services/r
 # NetSuite request row limit
 LIMIT = 1000
 
+TABLE_CONFIGS = {
+    'Account': {'unique_key': 'id', 'date_col': 'lastmodifieddate'},
+    'transactionLine': {'unique_key': 'uniquekey', 'date_col': 'linelastmodifieddate'},
+    'AccountingPeriod': {'unique_key': 'id', 'date_col': 'lastmodifieddate'},
+    'CUSTOMRECORD_360_COMMISSION_RULE': {'unique_key': 'id', 'date_col': 'lastmodified'},
+    'CUSTOMRECORD_360_COMMISSION_TRACKING': {'unique_key': 'id', 'date_col': 'lastmodified'},
+    'Quota': {'unique_key': 'id', 'date_col': 'date'},
+    'classification': {'unique_key': 'id', 'date_col': 'lastmodifieddate'},
+    'employee': {'unique_key': 'id', 'date_col': 'lastmodifieddate'},
+    'entity': {'unique_key': 'id', 'date_col': 'lastmodifieddate'},
+    'item': {'unique_key': 'id', 'date_col': 'lastmodifieddate'},
+    'transaction': {'unique_key': 'id', 'date_col': 'lastmodifieddate'},
+    'invoiceSalesTeam': {'unique_key': 'id', 'date_col': 'lastmodifieddate', 'batch_key': 'transaction', 'batch_range': 100000},
+    'transactionSalesTeam': {'unique_key': 'id', 'date_col': 'lastmodifieddate', 'batch_key': 'transaction', 'batch_range': 100000}
+}
 
 
 def get_netsuite_data(params, query):
@@ -273,13 +211,12 @@ def load_data_to_bq(query, schema, destination_table):
             params["offset"] = str(offset)
 
 
-    print(f" -------------- All Data Loaded to {destination_table} Successfully -------------- ")
+    print(f"All Data Loaded to {destination_table} Successfully")
     return True
 
 
 # Get NetSuite data from the last 2 days, based on lastmodifieddate
-# can maybe change this to 1 day
-def load_recent_netsuite_data(ns_table, schema, destination_table):
+def load_recent_netsuite_data(ns_table, schema, destination_table, date_col):
 
     columns = [field.name for field in schema]
 
@@ -294,7 +231,7 @@ def load_recent_netsuite_data(ns_table, schema, destination_table):
         "q": f"""
         SELECT {', '.join([item for item in columns])} 
         FROM {ns_table}
-        WHERE linelastmodifieddate >= TO_DATE('{current_date}', 'MM/DD/YYYY') - 2
+        WHERE {date_col} >= TO_DATE('{current_date}', 'MM/DD/YYYY') - 2
         """
     }
     
@@ -303,7 +240,7 @@ def load_recent_netsuite_data(ns_table, schema, destination_table):
 
 
 # merge data into BigQuery, so that existing rows are not duplicated
-def merge_into_bigquery(target_table, staging_table, schema, unique_key="id"):
+def merge_into_bigquery(target_table, staging_table, schema, unique_key):
     """
     Merges data from a staging table into the target table using BigQuery's MERGE statement.
 
@@ -352,16 +289,6 @@ def fix_boolean(value):
     elif value == "F":
         return False
     return value  # Return as-is if it's already valid
-
-def fix_timestamp_format(timestamp_str):
-    """Fixes and formats the input timestamp string to 'YYYY-MM-DD HH:MM:SS'."""
-    try:
-        # Check if timestamp is in a different format and adjust as needed
-        if len(timestamp_str) == 10:  # For date-only timestamps like '2022-01-01'
-            return datetime.strptime(timestamp_str, "%Y-%m-%d").strftime("%Y-%m-%d %H:%M:%S")
-        return datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None  # Return None if the format doesn't match
 
 
 def fix_date_format(date_str):
@@ -416,38 +343,75 @@ def wait_for_table_creation(table_id, timeout=60):
 
     raise TimeoutError(f"⛔ Table {table_id} did not appear within {timeout} seconds!")
 
+def create_schema_from_sheet(gsheet_rows):
+    schema = [
+        bigquery.SchemaField(
+            field['Column Name'],
+            field['Data Type'],
+            field['Nullable']
+        )
+        for field in gsheet_rows
+    ]
+
+    return schema
 
 
-"""  ----------- TransactionLine MERGE SCRIPT -----------  """
-
-
-# Get BigQuery table IDs
-STAGING_DATASET_PATH = f"{PROJECT_ID}.{DATASET_ID_STAGING}"
-TL_TABLE = f"{PROJECT_ID}.{DATASET_ID}.transactionLine"
-TL_TABLE_STAGING = f"{PROJECT_ID}.{DATASET_ID_STAGING}.transactionLine_staging"
-
-
+""" ------------ transaction table ETL script --------------"""
 # create staging dataset, if it does not already exist
-create_dataset(STAGING_DATASET_PATH)
+STAGING_DATASET = f"{PROJECT_ID}.{DATASET_ID_STAGING}"
+create_dataset(STAGING_DATASET)
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+creds = Credentials.from_service_account_file(os.getenv("GCP_KEY_PATH"), scopes=SCOPES)
+gspread_client = gspread.authorize(creds)
+spreadsheet = gspread_client.open_by_key("1J05aKxbxBhgV8l3Tj4NxlTNHhkyqmZgNlohgkB8a7KU")
+
+for sheet in spreadsheet.worksheets():
+    table_name = sheet.title
+    print('Start update for: ' + table_name)
 
 
-# make TL staging table based on schema
-create_table(TL_TABLE_STAGING, TL_SCHEMA)
-wait_for_table_creation(TL_TABLE_STAGING)
+    # Get unique key, date_field from config
+    unique_key = ""
+    date_col = ""
+    if table_name in TABLE_CONFIGS:
+        config = TABLE_CONFIGS[table_name]
+        unique_key = config['unique_key']
+        date_col = config['date_col']
+    else:
+        continue
 
 
-# load data from ns TL table, for specified columns, into bq staging table
-# returns false if there is no new data
-result = load_recent_netsuite_data("transactionLine", TL_SCHEMA, TL_TABLE_STAGING)
+    # Get schema from gsheet
+    worksheet = spreadsheet.worksheet(table_name)
+    rows = worksheet.get_all_records()
+    schema = create_schema_from_sheet(rows)
 
-# If there is new data, Merge staging table into TL table
-# Otherwise, do not run the merge
-if result: merge_into_bigquery(TL_TABLE, TL_TABLE_STAGING, TL_SCHEMA, 'uniquekey')
-
-# Delete staging table
-drop_table(TL_TABLE_STAGING)
+    # Get BigQuery table IDs
+    bq_table = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
+    staging_table = f"{PROJECT_ID}.{DATASET_ID_STAGING}.{table_name}_staging"
 
 
+    # make staging table based on schema
+    create_table(staging_table, schema)
+    wait_for_table_creation(staging_table)
 
-print("\n------------ Script Complete! ------------")
+
+    # load data from ns transaction table, for specified columns, into bq staging table
+    # returns false if there is no new data
+    result = load_recent_netsuite_data(table_name, schema, staging_table, date_col)
+
+    # If there is new data, Merge staging table into transaction table
+    # Otherwise, do not run the merge
+    if result: merge_into_bigquery(bq_table, staging_table, schema, unique_key)
+
+
+    print ("--- Updated Table: " + table_name + " ----")
+
+time.sleep(5)
+drop_dataset(STAGING_DATASET)
+
+
+print("------------ Full Update Complete! ------------")
+
 
