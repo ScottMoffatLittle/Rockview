@@ -17,7 +17,7 @@ from google.oauth2.service_account import Credentials
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables from secrets.env
-load_dotenv("secrets.env")
+load_dotenv("secrets_prod.env")
 
 # Authenticate with google cloud
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.getenv("GCP_KEY_PATH")
@@ -36,7 +36,8 @@ NETSUITE_TOKEN = os.getenv("NETSUITE_TOKEN")
 NETSUITE_TOKEN_SECRET = os.getenv("NETSUITE_TOKEN_SECRET")
 
 # Gsheet spreasheet key
-GSHEET_KEY = '1vGG6CjpjkxX9BCAP0r0PHonD1ty1v4xqONbvfEMQOMI'
+GSHEET_KEY = os.getenv("GSHEET_KEY")
+
 
 # Initialize BigQuery client
 client = bigquery.Client()
@@ -67,6 +68,15 @@ TABLE_CONFIGS = {
     'transactionSalesTeam': {'unique_key': 'id', 'date_col': 'lastmodifieddate', 'batch_key': 'transaction', 'batch_range': 100000}
 }
 
+BQ_TYPE_MAP = {
+    "FLOAT": "FLOAT64",
+    "STRING": "STRING",
+    "INTEGER": "INT64",
+    "BOOLEAN": "BOOL",
+    "DATE": "DATE",
+    "DATETIME": "DATETIME",
+    "TIMESTAMP": "TIMESTAMP"
+}
 
 def get_netsuite_data(params, query):
     """
@@ -186,6 +196,8 @@ def load_data_to_bq(query, schema, destination_table):
             print("No data to insert!")
             return False
 
+        deduplicate_rows(batch)
+
         for record in batch:
             record.pop('links', None)
             record['updated_at'] = timestamp
@@ -219,6 +231,78 @@ def load_data_to_bq(query, schema, destination_table):
     print(f"All Data Loaded to {destination_table} Successfully")
     return True
 
+def load_data_to_bq_parallel(query, schema, destination_table, total_records, num_threads=30):
+    timestamp = time.time()
+    offsets = list(range(0, total_records, LIMIT))
+    print(f"🚀 Starting parallel load with {len(offsets)} batches")
+
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = []
+        for offset in offsets:
+            params = {"limit": str(LIMIT), "offset": str(offset)}
+            futures.append(executor.submit(load_data_batch, params, query, schema, destination_table, timestamp))
+
+        results = [f.result() for f in as_completed(futures)]
+
+    if all(results):
+        print(f"🎉 All data loaded into {destination_table} successfully!")
+        return True
+    else:
+        print(f"⚠️ Some batches failed to load.")
+        return False
+
+
+def load_data_batch(params, query, schema, destination_table, timestamp):
+    boolean_columns = {field.name for field in schema if field.field_type.upper() == 'BOOLEAN'}
+    date_columns = {field.name for field in schema if field.field_type.upper() == 'DATE'}
+
+    
+    response = get_netsuite_data(params, query)
+    response.raise_for_status()
+    response_json = response.json()
+    batch = response_json.get("items", [])
+
+    deduplicate_rows(batch)
+
+    for record in batch:
+        record.pop('links', None)
+        record['updated_at'] = timestamp
+
+        for col in boolean_columns:
+            if col in record:
+                record[col] = fix_boolean(record[col])
+        for col in date_columns:
+            if col in record:
+                record[col] = fix_date_format(record[col])
+
+    success = load_with_retries(destination_table, batch)
+
+    if success:
+        print(f"✅ Loaded {len(batch)} rows at offset {params['offset']}")
+        return True
+    else:
+        print(f"❌ Insert error at offset {params['offset']}: {errors}")
+        return False
+
+
+def get_total_record_count(query):
+    # Extract the WHERE clause from the original query
+    where_clause = query["q"].split("WHERE", 1)[-1].strip()
+
+    count_query = {
+        "q": f"SELECT COUNT(*) as count FROM {query['q'].split('FROM')[1].split('WHERE')[0].strip()} WHERE {where_clause}"
+    }
+
+    response = get_netsuite_data({}, count_query)
+    response.raise_for_status()
+
+    items = response.json().get("items", [])
+    if not items:
+        return 0
+
+    count = int(items[0]["count"])
+    return count
+
 
 # Get NetSuite data from the last 2 days, based on lastmodifieddate
 def load_recent_netsuite_data(ns_table, schema, destination_table, date_col):
@@ -240,7 +324,8 @@ def load_recent_netsuite_data(ns_table, schema, destination_table, date_col):
         """
     }
     
-    return load_data_to_bq(query, schema, destination_table)
+    record_count = get_total_record_count(query)
+    return load_data_to_bq_parallel(query, schema, destination_table, record_count)
 
 
 def load_data_by_unique_key(ns_table, schema, destination_table, start_key, max_key, unique_id, batch_range, num_threads=5):
@@ -303,6 +388,8 @@ def load_data_by_unique_key(ns_table, schema, destination_table, start_key, max_
                 print(f"✅ No data with {unique_id}s between {lower}–{upper}")
                 break
 
+            deduplicate_rows(batch)
+
             for record in batch:
                 record.pop('links', None)
                 record['updated_at'] = timestamp
@@ -347,7 +434,7 @@ def load_data_by_unique_key(ns_table, schema, destination_table, start_key, max_
 
 
 # merge data into BigQuery, so that existing rows are not duplicated
-def merge_into_bigquery(target_table, staging_table, schema, unique_key, table_name):
+def merge_into_bigquery(target_table, staging_table, schema, unique_key, table_name, date_col):
     """
     Merges data from a staging table into the target table using BigQuery's MERGE statement.
 
@@ -376,7 +463,7 @@ def merge_into_bigquery(target_table, staging_table, schema, unique_key, table_n
         MERGE `{target_table}` AS T
         USING `{staging_table}` AS S
         ON T.{unique_key} = S.{unique_key}
-           AND T.date = S.date
+           AND T.{date_col} = S.{date_col}
 
         WHEN MATCHED THEN 
             UPDATE SET
@@ -386,16 +473,28 @@ def merge_into_bigquery(target_table, staging_table, schema, unique_key, table_n
             INSERT ({insert_columns})
             VALUES ({insert_values})
         """
+    # query to de-duplicate and merge records
     else:
         query = f"""
             MERGE `{target_table}` AS T
-            USING `{staging_table}` AS S
+            USING (
+                SELECT *
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY {unique_key}
+                               ORDER BY {date_col} DESC
+                           ) AS row_num
+                    FROM `{staging_table}`
+                )
+                WHERE row_num = 1
+            ) AS S
             ON T.{unique_key} = S.{unique_key}
-            
+
             WHEN MATCHED THEN 
                 UPDATE SET
                     {update_clause}
-        
+
             WHEN NOT MATCHED THEN
                 INSERT ({insert_columns})
                 VALUES ({insert_values})
@@ -473,9 +572,22 @@ def drop_table(table_id):
     print(f"✅ Table {table_id} dropped successfully.")
 
 
+def create_schema_from_sheet(gsheet_rows):
+    schema = [
+        bigquery.SchemaField(
+            field['Column Name'],
+            field['Data Type'],
+            field['Nullable']
+        )
+        for field in gsheet_rows
+    ]
+
+    return schema
+
 def wait_for_table_creation(table_id, timeout=60):
     # Waits until the specified table exists in BigQuery.
     start_time = time.time()
+    time.sleep(5)
 
     while time.time() - start_time < timeout:
         try:
@@ -488,17 +600,61 @@ def wait_for_table_creation(table_id, timeout=60):
 
     raise TimeoutError(f"⛔ Table {table_id} did not appear within {timeout} seconds!")
 
-def create_schema_from_sheet(gsheet_rows):
-    schema = [
-        bigquery.SchemaField(
-            field['Column Name'],
-            field['Data Type'],
-            field['Nullable']
-        )
-        for field in gsheet_rows
-    ]
 
-    return schema
+def wait_for_table_dropping(table_id, timeout=60):
+    """Waits until the specified table is dropped in BigQuery."""
+    start_time = time.time()
+    time.sleep(3)
+
+    while time.time() - start_time < timeout:
+        try:
+            # Check if the table exists
+            client.get_table(table_id)
+            print(f"⏳ Table {table_id} is still present, waiting for drop...")
+            time.sleep(3)  # Wait for 3 seconds before retrying
+        except Exception:
+            # If the table does not exist, it's dropped
+            print(f"✅ Table {table_id} is successfully dropped.")
+            return
+
+    raise TimeoutError(f"⛔ Table {table_id} was not dropped within {timeout} seconds!")
+
+def wait_for_dataset_creation(dataset_id, timeout=60):
+    """
+    Waits until the specified dataset exists in BigQuery.
+    """
+    start_time = time.time()
+    time.sleep(3)
+
+    while time.time() - start_time < timeout:
+        try:
+            client.get_dataset(dataset_id)  # Check if the dataset exists
+            print(f"✅ Dataset {dataset_id} is ready.")
+            return
+        except Exception:
+            print(f"⏳ Waiting for dataset {dataset_id} to be created...")
+            time.sleep(3)
+
+    raise TimeoutError(f"⛔ Dataset {dataset_id} did not appear within {timeout} seconds!")
+
+def wait_for_dataset_dropping(dataset_id, timeout=60):
+    """
+    Waits until the specified dataset is dropped in BigQuery.
+    """
+    start_time = time.time()
+    time.sleep(3)
+
+    while time.time() - start_time < timeout:
+        try:
+            client.get_dataset(dataset_id)  # Check if the dataset exists
+            print(f"⏳ Dataset {dataset_id} is still present, waiting for drop...")
+            time.sleep(3)
+        except Exception:
+            print(f"✅ Dataset {dataset_id} is successfully dropped.")
+            return
+
+    raise TimeoutError(f"⛔ Dataset {dataset_id} was not dropped within {timeout} seconds!")
+
 
 def get_max_unique_key(ns_table, unique_id):
     """
@@ -547,22 +703,12 @@ def sync_table_schema(target_table, sheet_schema):
     # Find fields present in sheet but missing in BQ
     missing_fields = sheet_fields - bq_fields
 
-    bq_type_map = {
-        "FLOAT": "FLOAT64",
-        "STRING": "STRING",
-        "INTEGER": "INT64",
-        "BOOLEAN": "BOOL",
-        "DATE": "DATE",
-        "DATETIME": "DATETIME",
-        "TIMESTAMP": "TIMESTAMP"
-    }
-
     if missing_fields:
         print(f"🆕 New columns detected in schema: {missing_fields}")
 
         for field in sheet_schema:
             if field.name in missing_fields:
-                field_type = bq_type_map.get(field.field_type.upper(), field.field_type)
+                field_type = BQ_TYPE_MAP.get(field.field_type.upper(), field.field_type)
                 alter_query = f"""
                 ALTER TABLE `{target_table}`
                 ADD COLUMN {field.name} {field_type}
@@ -592,10 +738,29 @@ def backfill_columns(ns_table, target_table, sheet_schema, unique_key, date_col,
     load_data_by_unique_key(ns_table, backfill_schema, target_table, min_key, max_key, batch_key, batch_range, num_threads=10)
 
 
-""" ------------ all table ETL script --------------"""
+def deduplicate_rows(rows: list[dict]) -> list[dict]:
+    seen = set()
+    deduped = []
+
+    for row in rows:
+        # Use JSON string as a hashable representation
+        row_key = json.dumps(row, sort_keys=True)
+        if row_key not in seen:
+            seen.add(row_key)
+            deduped.append(row)
+
+    return deduped
+
+
+
+""" ------------ Prod ETL script for all tables --------------"""
 # create staging dataset, if it does not already exist
 STAGING_DATASET = f"{PROJECT_ID}.{DATASET_ID_STAGING}"
+drop_dataset(STAGING_DATASET)
+wait_for_dataset_dropping(STAGING_DATASET)
 create_dataset(STAGING_DATASET)
+wait_for_dataset_creation(STAGING_DATASET)
+
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 creds = Credentials.from_service_account_file(os.getenv("GCP_KEY_PATH"), scopes=SCOPES)
@@ -605,9 +770,6 @@ spreadsheet = gspread_client.open_by_key(GSHEET_KEY)
 for sheet in spreadsheet.worksheets():
     table_name = sheet.title
     print('Start update for: ' + table_name)
-
-    if table_name not in ['Quota']:
-        continue
 
 
     # Get unique key, date_field from config
@@ -628,7 +790,6 @@ for sheet in spreadsheet.worksheets():
     else:
         continue
 
-
     # Get schema from gsheet
     worksheet = spreadsheet.worksheet(table_name)
     rows = worksheet.get_all_records()
@@ -648,21 +809,21 @@ for sheet in spreadsheet.worksheets():
     # If there are new GSheet columns, backfill their data into BigQuery
     if new_columns:
         backfill_columns(table_name, staging_table, schema, unique_key, date_col, batch_key, batch_range, new_columns)
-        merge_into_bigquery(bq_table, staging_table, schema, unique_key, table_name)
+        merge_into_bigquery(bq_table, staging_table, schema, unique_key, table_name, date_col)
 
-    # otherwise, merge recent data into bigquery
-    else: 
-        # returns false if there is no new data
+    # load data from ns transaction table, for specified columns, into bq staging table
+    # returns false if there is no new data
+    else:
         result = load_recent_netsuite_data(table_name, schema, staging_table, date_col)
 
         # If there is new data, Merge staging table into transaction table
         # Otherwise, do not run the merge
-        if result: merge_into_bigquery(bq_table, staging_table, schema, unique_key, table_name)
+        if result: merge_into_bigquery(bq_table, staging_table, schema, unique_key, table_name, date_col)
 
-    print ("--- Updated Table: " + table_name + " ----")
+    drop_table(staging_table)
+    print ("--- Update Complete for Table: " + table_name + " ----")
 
-# time.sleep(5)
-# drop_dataset(STAGING_DATASET)
+drop_dataset(STAGING_DATASET)
 
 
 print("------------ Full Update Complete! ------------")

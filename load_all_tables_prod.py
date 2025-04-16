@@ -19,7 +19,7 @@ from google.oauth2.service_account import Credentials
 
 
 # Load environment variables from secrets.env
-load_dotenv("secrets.env")
+load_dotenv("secrets_prod.env")
 
 # Authenticate with google cloud
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.getenv("GCP_KEY_PATH")
@@ -37,6 +37,8 @@ NETSUITE_CONSUMER_SECRET = os.getenv("NETSUITE_CONSUMER_SECRET")
 NETSUITE_TOKEN = os.getenv("NETSUITE_TOKEN")
 NETSUITE_TOKEN_SECRET = os.getenv("NETSUITE_TOKEN_SECRET")
 
+# Gsheet spreasheet key
+GSHEET_KEY = os.getenv("GSHEET_KEY")
 
 # Initialize BigQuery client
 client = bigquery.Client()
@@ -481,6 +483,42 @@ def wait_for_table_dropping(table_id, timeout=60):
     raise TimeoutError(f"⛔ Table {table_id} was not dropped within {timeout} seconds!")
 
 
+def wait_for_dataset_creation(dataset_id, timeout=60):
+    """
+    Waits until the specified dataset exists in BigQuery.
+    """
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        try:
+            client.get_dataset(dataset_id)  # Check if the dataset exists
+            print(f"✅ Dataset {dataset_id} is ready.")
+            return
+        except Exception:
+            print(f"⏳ Waiting for dataset {dataset_id} to be created...")
+            time.sleep(3)
+
+    raise TimeoutError(f"⛔ Dataset {dataset_id} did not appear within {timeout} seconds!")
+
+def wait_for_dataset_dropping(dataset_id, timeout=60):
+    """
+    Waits until the specified dataset is dropped in BigQuery.
+    """
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        try:
+            client.get_dataset(dataset_id)  # Check if the dataset exists
+            print(f"⏳ Dataset {dataset_id} is still present, waiting for drop...")
+            time.sleep(3)
+        except Exception:
+            print(f"✅ Dataset {dataset_id} is successfully dropped.")
+            return
+
+    raise TimeoutError(f"⛔ Dataset {dataset_id} was not dropped within {timeout} seconds!")
+
+
+
 def load_data_by_unique_key(ns_table, schema, destination_table, start_key, max_key, unique_id, batch_range, num_threads=5):
     """
     Loads NetSuite data into BigQuery using unique_id based batching and concurrent futures.
@@ -652,20 +690,18 @@ TABLE_CONFIGS = {
 
 
 """ ------------ transaction table ETL script --------------"""
+# create dataset, if it does not already exist
+DATASET = f"{PROJECT_ID}.{DATASET_ID}"
+create_dataset(DATASET)
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 creds = Credentials.from_service_account_file(os.getenv("GCP_KEY_PATH"), scopes=SCOPES)
 gspread_client = gspread.authorize(creds)
-spreadsheet = gspread_client.open_by_key("1J05aKxbxBhgV8l3Tj4NxlTNHhkyqmZgNlohgkB8a7KU")
+spreadsheet = gspread_client.open_by_key(GSHEET_KEY)
 
 for sheet in spreadsheet.worksheets():
     table_name = sheet.title
     print('here for ' + table_name)
-
-    # List of already loaded tables, to no re-load
-    if table_name in ['Account', 'transactionLine', 'transaction', 'AccountingPeriod', 'CUSTOMRECORD_360_COMMISSION_RULE', 'CUSTOMRECORD_360_COMMISSION_TRACKING', 'Quota', 'classification', 'employee', 'entity']:
-        print('already loaded')
-        continue
-
 
     # Get unique ID, or batch ID if applicable
     # Get batch range if applicable
@@ -698,7 +734,6 @@ for sheet in spreadsheet.worksheets():
     wait_for_table_dropping(bq_table)
     create_table(bq_table, schema)
     wait_for_table_creation(bq_table)
-
 
     min_key = get_min_unique_key(table_name, unique_key)
     max_key = get_max_unique_key(table_name, unique_key)

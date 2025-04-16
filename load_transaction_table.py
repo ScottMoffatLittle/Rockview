@@ -37,6 +37,8 @@ NETSUITE_CONSUMER_SECRET = os.getenv("NETSUITE_CONSUMER_SECRET")
 NETSUITE_TOKEN = os.getenv("NETSUITE_TOKEN")
 NETSUITE_TOKEN_SECRET = os.getenv("NETSUITE_TOKEN_SECRET")
 
+# Gsheet spreasheet key
+GSHEET_KEY = os.getenv("GSHEET_KEY")
 
 # Initialize BigQuery client
 client = bigquery.Client()
@@ -622,7 +624,7 @@ creds = Credentials.from_service_account_file(os.getenv("GCP_KEY_PATH"), scopes=
 gspread_client = gspread.authorize(creds)
 
 
-spreadsheet = gspread_client.open_by_key("1J05aKxbxBhgV8l3Tj4NxlTNHhkyqmZgNlohgkB8a7KU")
+spreadsheet = gspread_client.open_by_key(GSHEET_KEY)
 worksheet = spreadsheet.worksheet('transaction')
 rows = worksheet.get_all_records()
 schema = create_schema_from_sheet(rows)

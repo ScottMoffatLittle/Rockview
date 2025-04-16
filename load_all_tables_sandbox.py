@@ -37,6 +37,9 @@ NETSUITE_CONSUMER_SECRET = os.getenv("NETSUITE_CONSUMER_SECRET")
 NETSUITE_TOKEN = os.getenv("NETSUITE_TOKEN")
 NETSUITE_TOKEN_SECRET = os.getenv("NETSUITE_TOKEN_SECRET")
 
+# Gsheet spreasheet key
+# GSHEET_KEY = os.getenv("GSHEET_KEY")
+GSHEET_KEY = '1tZnA3HjLARIaciYJwacK5rLtsqxvhhDU8e_vSz-Ta-g'
 
 # Initialize BigQuery client
 client = bigquery.Client()
@@ -451,6 +454,7 @@ def drop_table(table_id):
 def wait_for_table_creation(table_id, timeout=60):
     # Waits until the specified table exists in BigQuery.
     start_time = time.time()
+    time.sleep(30)
 
     while time.time() - start_time < timeout:
         try:
@@ -466,6 +470,7 @@ def wait_for_table_creation(table_id, timeout=60):
 def wait_for_table_dropping(table_id, timeout=60):
     """Waits until the specified table is dropped in BigQuery."""
     start_time = time.time()
+    time.sleep(10)
 
     while time.time() - start_time < timeout:
         try:
@@ -655,15 +660,26 @@ TABLE_CONFIGS = {
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 creds = Credentials.from_service_account_file(os.getenv("GCP_KEY_PATH"), scopes=SCOPES)
 gspread_client = gspread.authorize(creds)
-spreadsheet = gspread_client.open_by_key("1J05aKxbxBhgV8l3Tj4NxlTNHhkyqmZgNlohgkB8a7KU")
+spreadsheet = gspread_client.open_by_key(GSHEET_KEY)
 
 for sheet in spreadsheet.worksheets():
     table_name = sheet.title
     print('here for ' + table_name)
 
     # List of already loaded tables, to no re-load
-    if table_name in ['Account', 'transactionLine', 'transaction', 'AccountingPeriod', 'CUSTOMRECORD_360_COMMISSION_RULE', 'CUSTOMRECORD_360_COMMISSION_TRACKING', 'Quota', 'classification', 'employee', 'entity']:
+    """
+    if table_name in ['Account', 'transactionLine', 'CUSTOMRECORD_360_COMMISSION_RULE', 'CUSTOMRECORD_360_COMMISSION_TRACKING', 'classification', 'employee', 'entity', 'item', 'invoiceSalesTeam', 'transactionSalesTeam']:
         print('already loaded')
+        continue
+    """
+
+    """
+    if table_name not in ['AccountingPeriod', 'Quota']:
+        continue
+
+    """
+
+    if table_name not in ['Quota']:
         continue
 
 
@@ -693,11 +709,15 @@ for sheet in spreadsheet.worksheets():
     # Get BigQuery table ID
     bq_table = f"{PROJECT_ID}.{DATASET_ID}.{table_name}"
 
+    """
     # Create table in BQ
     drop_table(bq_table)
     wait_for_table_dropping(bq_table)
     create_table(bq_table, schema)
+    time.sleep(5)
     wait_for_table_creation(bq_table)
+    """
+    
 
 
     min_key = get_min_unique_key(table_name, unique_key)
